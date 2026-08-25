@@ -1,0 +1,59 @@
+import math
+
+# Tela
+SCREEN_WIDTH = 1000
+SCREEN_HEIGHT = 600
+FPS = 60
+
+# Arena
+ARENA_RADIUS = 900.0
+PLAYER_RADIUS = 20.0
+
+# Câmera
+BASE_FOV = math.radians(70)
+MAX_FOV = math.radians(110)
+
+RENDER_COLS = 300
+MAX_DEPTH = ARENA_RADIUS * 2
+
+# Jogador
+PLAYER_SPEED = 220.0
+PLAYER_TURN_SPEED = 2.4
+MOUSE_SENSITIVITY = 0.0025
+PLAYER_MAX_HP = 100
+
+# Zumbis
+ZOMBIE_DAMAGE = 12
+ZOMBIE_ATTACK_RANGE = 42
+ZOMBIE_ATTACK_COOLDOWN = 0.8
+
+# Tiro
+SHOOT_RANGE = ARENA_RADIUS * 2
+SHOOT_COOLDOWN = 0.32
+SHOOT_ANGLE_TOLERANCE = math.radians(4)
+
+# Power-ups
+POWERUP_DROP_CHANCE = 0.18
+
+POWERUP_DURATION = {
+    "vision": 8.0,
+    "rapid_fire": 7.0,
+    "freeze": 4.0,
+}
+
+# Cores
+WHITE = (240, 240, 240)
+BLACK = (10, 10, 10)
+
+RED = (200, 40, 40)
+DARK_RED = (110, 15, 15)
+
+GREEN = (60, 200, 90)
+DARK_GREEN = (25, 110, 50)
+
+YELLOW = (230, 200, 40)
+BLUE = (60, 140, 230)
+ORANGE = (230, 140, 30)
+
+GREY = (70, 70, 75)
+SAND = (150, 120, 80)
