@@ -3,6 +3,8 @@ import sys
 
 import pygame
 
+import math
+
 from config import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
@@ -10,6 +12,7 @@ from config import (
     PLAYER_MAX_HP,
     SHOOT_RANGE,
     SHOOT_COOLDOWN,
+    SHOOT_COOLDOWN_RAPID,
     SHOOT_ANGLE_TOLERANCE,
     POWERUP_DROP_CHANCE,
     MAX_FOV,
@@ -20,9 +23,11 @@ from waves import WaveManager
 from renderer import Renderer
 from ui import UI
 from utils import norm_angle
+from shoot import Bullet
 from powerups import (
     POWERUP_TYPES,
     POWERUP_LABELS,
+    POWERUP_WEIGHTS,
 )
 
 
@@ -53,6 +58,9 @@ class Game:
         self.player = Player()
 
         self.zombies = []
+        self.bullets = []
+
+        self.mouse_held = False
 
         self.wave_manager = WaveManager(
             self.zombies
@@ -78,6 +86,9 @@ class Game:
         self.player = Player()
 
         self.zombies.clear()
+        self.bullets.clear()
+
+        self.mouse_held = False
 
         self.wave_manager = WaveManager(
             self.zombies
@@ -90,14 +101,17 @@ class Game:
 
         self.start_next_round()
 
-    def start_next_round(self):
+    def start_next_round(self, explosion=False):
 
         self.wave_manager.start_next_round()
 
         self.player.round_num = (
             self.wave_manager.round_num
         )
-
+        if explosion:
+            self.notify(
+                f"XXXXX {self.wave_manager.round_num} - EXPLOSÃO!"
+            )
         self.notify(
             f"RODADA {self.wave_manager.round_num}"
         )
@@ -134,6 +148,17 @@ class Game:
             keys,
         )
 
+        # Tiro contínuo: enquanto o botão estiver pressionado e o
+        # power-up "rapid_fire" estiver ativo, dispara automaticamente
+        # a cada frame (o próprio try_shoot respeita o cooldown).
+        if (
+            self.mouse_held
+            and self.player.has_powerup("rapid_fire")
+        ):
+            self.try_shoot()
+
+        self.update_bullets(dt)
+
         frozen = self.player.has_powerup(
             "freeze"
         )
@@ -167,18 +192,16 @@ class Game:
 
     def try_shoot(self):
 
-        if (
-            self.player.shoot_timer > 0
-            and not self.player.has_powerup(
-                "rapid_fire"
-            )
-        ):
+        # Cooldown entre um tiro e outro: precisa SEMPRE ser respeitado,
+        # com ou sem "tiro contínuo" ativo. O que muda com o power-up é
+        # apenas o valor do cooldown (bem mais curto), nunca se ele existe.
+        if self.player.shoot_timer > 0:
             return
 
         if self.player.has_powerup(
             "rapid_fire"
         ):
-            self.player.shoot_timer = 0.06
+            self.player.shoot_timer = SHOOT_COOLDOWN_RAPID
         else:
             self.player.shoot_timer = SHOOT_COOLDOWN
 
@@ -200,7 +223,7 @@ class Game:
             ) ** 0.5
 
             angle = norm_angle(
-                __import__("math").atan2(dy, dx)
+                math.atan2(dy, dx)
                 - self.player.angle
             )
 
@@ -215,15 +238,41 @@ class Game:
 
         if best_zombie:
 
-            best_zombie.hp -= 1
-
-            best_zombie.hit_flash = 0.15
-
-            if best_zombie.hp <= 0:
-
-                self.kill_zombie(
-                    best_zombie
+            # A mira trava no alvo na hora do disparo, mas o impacto só
+            # acontece quando a bala "viaja" até lá (ver update_bullets).
+            self.bullets.append(
+                Bullet(
+                    self.player.x,
+                    self.player.y,
+                    best_zombie,
                 )
+            )
+
+    def update_bullets(self, dt):
+
+        remaining = []
+
+        for bullet in self.bullets:
+
+            arrived = bullet.update(dt)
+
+            if not arrived:
+                remaining.append(bullet)
+                continue
+
+            target = bullet.target
+
+            # O alvo pode ter morrido enquanto a bala viajava
+            # (ex.: power-up de explosão). Nesse caso não conta de novo.
+            if target.alive:
+
+                target.hit_flash = 0.15
+
+                # Qualquer zumbi que tome um tiro morre — a bala que
+                # chega ao alvo é sempre um abate garantido.
+                self.kill_zombie(target)
+
+        self.bullets = remaining
 
     def kill_zombie(self, zombie):
 
@@ -233,9 +282,14 @@ class Game:
 
         if random.random() < POWERUP_DROP_CHANCE:
 
-            powerup = random.choice(
-                POWERUP_TYPES
-            )
+            powerup = random.choices(
+                POWERUP_TYPES,
+                weights=[
+                    POWERUP_WEIGHTS[name]
+                    for name in POWERUP_TYPES
+                ],
+                k=1,
+            )[0]
 
             self.apply_powerup(
                 powerup
@@ -335,15 +389,26 @@ class Game:
                     and event.button == 1
                 ):
 
+                    self.mouse_held = True
+
                     if self.state == "playing":
 
                         self.try_shoot()
+
+                elif (
+                    event.type
+                    == pygame.MOUSEBUTTONUP
+                    and event.button == 1
+                ):
+
+                    self.mouse_held = False
 
             self.update(dt)
 
             self.renderer.render(
                 self.player,
                 self.zombies,
+                self.bullets,
             )
 
             self.ui.draw(

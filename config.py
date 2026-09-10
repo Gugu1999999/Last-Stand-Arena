@@ -30,10 +30,15 @@ ZOMBIE_ATTACK_COOLDOWN = 0.8
 # Tiro
 SHOOT_RANGE = ARENA_RADIUS * 2
 SHOOT_COOLDOWN = 0.32
+SHOOT_COOLDOWN_RAPID = 0.09
 SHOOT_ANGLE_TOLERANCE = math.radians(4)
 
+# Velocidade da bala (unidades/seg) -> define o tempo até o impacto
+BULLET_SPEED = 1900.0
+BULLET_MIN_TRAVEL_TIME = 0.05
+
 # Power-ups
-POWERUP_DROP_CHANCE = 0.18
+POWERUP_DROP_CHANCE = 0.30
 
 POWERUP_DURATION = {
     "vision": 8.0,

@@ -12,6 +12,7 @@ from config import (
     WHITE,
     GREEN,
     DARK_GREEN,
+    YELLOW,
 )
 
 from utils import (
@@ -26,7 +27,7 @@ class Renderer:
 
         self.screen = screen
 
-    def render(self, player, zombies):
+    def render(self, player, zombies, bullets=None):
 
         screen = self.screen
 
@@ -236,8 +237,76 @@ class Renderer:
                 max(1, int(size * 0.04)),
             )
 
+        self.draw_bullets(
+            player,
+            bullets or [],
+            fov,
+            half_h,
+            z_buffer,
+        )
+
         self.draw_weapon()
         self.draw_crosshair()
+
+    def draw_bullets(
+        self,
+        player,
+        bullets,
+        fov,
+        half_h,
+        z_buffer,
+    ):
+
+        for bullet in bullets:
+
+            dx = bullet.x - player.x
+            dy = bullet.y - player.y
+
+            distance = math.hypot(dx, dy)
+
+            if distance < 1:
+                continue
+
+            angle = norm_angle(
+                math.atan2(dy, dx) -
+                player.angle
+            )
+
+            if abs(angle) >= fov / 2 + 0.05:
+                continue
+
+            screen_x = (
+                SCREEN_WIDTH / 2 +
+                math.tan(angle) *
+                (SCREEN_WIDTH / 2) /
+                math.tan(fov / 2)
+            )
+
+            col = int(
+                screen_x /
+                SCREEN_WIDTH *
+                RENDER_COLS
+            )
+
+            col = max(
+                0,
+                min(RENDER_COLS - 1, col)
+            )
+
+            if distance > z_buffer[col] + 6:
+                continue
+
+            size = max(
+                2,
+                min(14, (SCREEN_HEIGHT * 14) / distance)
+            )
+
+            pygame.draw.circle(
+                self.screen,
+                YELLOW,
+                (int(screen_x), int(half_h)),
+                int(size),
+            )
 
     def draw_weapon(self):
 
