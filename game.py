@@ -16,6 +16,7 @@ from config import (
 )
 
 from player import Player
+from audio import AudioManager
 from waves import WaveManager
 from renderer import Renderer
 from ui import UI
@@ -30,10 +31,15 @@ class Game:
 
     def __init__(self):
 
+        self.audio = AudioManager()
+        self.audio.play_music()
+
         pygame.init()
 
         pygame.display.set_caption(
             "Last Stand Arena"
+
+        
         )
 
         self.screen = pygame.display.set_mode(
