@@ -59,6 +59,7 @@ class Game:
 
         self.zombies = []
         self.bullets = []
+        self.powerups = []
 
         self.mouse_held = False
 
@@ -87,6 +88,7 @@ class Game:
 
         self.zombies.clear()
         self.bullets.clear()
+        self.powerups.clear()
 
         self.mouse_held = False
 
@@ -146,6 +148,8 @@ class Game:
         self.player.handle_movement(
             dt,
             keys,
+
+        self.collect_powerups()
         )
 
         # Tiro contínuo: enquanto o botão estiver pressionado e o
@@ -189,6 +193,8 @@ class Game:
             self.zombies.clear()
 
             self.start_next_round()
+
+            
 
     def try_shoot(self):
 
