@@ -113,6 +113,8 @@ class Game:
 
         self.wave_manager.start_next_round()
 
+        self.audio.play_round_start()
+
         self.player.round_num = (
             self.wave_manager.round_num
         )
@@ -177,6 +179,7 @@ class Game:
                 dt,
                 self.player,
                 frozen,
+                self.audio,
             )
 
             if zombie.alive:
@@ -187,6 +190,8 @@ class Game:
             self.player.hp = 0
 
             self.state = "game_over"
+
+            self.audio.play_game_over()
 
             return
 
@@ -209,6 +214,7 @@ class Game:
 
             if distance <= 1.2:
                 self.apply_powerup(powerup["type"])
+                self.audio.play_powerup()
             else:
                 remaining.append(powerup)
 
@@ -272,6 +278,8 @@ class Game:
                 )
             )
 
+        self.audio.play_shoot()
+
     def update_bullets(self, dt):
 
         remaining = []
@@ -326,6 +334,7 @@ class Game:
 
         if name == "explosion":
 
+            self.audio.play_explosion()
             count = 0
 
             for zombie in self.zombies:

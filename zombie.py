@@ -1,4 +1,5 @@
 import math
+from audio import AudioManager
 
 from config import (
     ZOMBIE_DAMAGE,
@@ -22,7 +23,7 @@ class Zombie:
         self.attack_timer = 0.0
         self.hit_flash = 0.0
 
-    def update(self, dt, player, frozen):
+    def update(self, dt, player, frozen, audio):
 
         if not self.alive:
             return
@@ -57,5 +58,5 @@ class Zombie:
             if self.attack_timer <= 0:
 
                 player.hp -= ZOMBIE_DAMAGE
-
+                audio.play_zombie_attack()
                 self.attack_timer = ZOMBIE_ATTACK_COOLDOWN
