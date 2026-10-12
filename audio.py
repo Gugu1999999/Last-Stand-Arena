@@ -14,9 +14,9 @@ SFX_FILES = {
     "hit":         (["impacto.wav", "impacto.ogg", "impacto.mp3"], 0.5),
     "kill":        (["morte.wav", "morte.ogg", "morte.mp3"], 0.6),
     "hurt":        (["dano.wav", "dano.ogg", "dano.mp3"], 0.8),
-    "enemy_attack": (["ataque.wav", "ataque.ogg", "ataque.mp3"], 0.6),
-    "round_start": (["rodada.wav", "rodada.ogg", "rodada.mp3"], 0.7),
-    "game_over":   (["game_over.wav", "game_over.ogg", "game_over.mp3"], 0.9),
+    "enemy_attack": (["ataque_espartano.wav", "ataquezombie.mp3", "ataque.wav", "ataque.ogg", "ataque.mp3"], 0.2),
+    "round_start": (["restart.mp3", "rodada.wav", "rodada.ogg", "rodada.mp3"], 0.7),
+    "game_over":   (["gameover.mp3", "game_over.wav", "game_over.ogg", "game_over.mp3"], 0.8),
 }
 
 MUSIC_FILE = "trilha_sonora.mp3"
@@ -94,3 +94,9 @@ class AudioManager:
 
     def play_explosion(self):
         self.play("explosion")
+
+    def play_game_over(self):
+        self.play("game_over")
+
+    def play_round_start(self):
+        self.play("round_start")

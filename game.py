@@ -418,6 +418,7 @@ class Game:
         for e in self.enemies:
             if e.update(dt, p, frozen):
                 self.fx.shake(7, 0.3)
+                self.audio.play_zombie_attack()
                 self.audio.play("hurt")
 
         separate_enemies(self.enemies)
