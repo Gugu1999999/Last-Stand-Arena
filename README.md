@@ -1,70 +1,86 @@
-# Last Stand Arena — Protótipo Jogável
+# Last Stand Arena
 
-Protótipo em **Python + pygame** do jogo descrito no documento de design.
-Implementa visão em primeira pessoa via **ray casting** (estilo Doom),
-arena circular, zumbis vindos dos 4 lados, ondas progressivas e power-ups.
+Jogo de sobrevivência em primeira pessoa (ray casting) em uma arena circular. Espartanos saem
+pelos 4 portões em ondas cada vez mais fortes; você só enxerga um cone de visão.
 
 ## Como rodar
 
-1. Instale as dependências:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Rode o jogo:
-   ```bash
-   python main.py
-   ```
+```bash
+pip install -r requirements.txt
+python main.py
+```
 
-Requer Python 3.9+ e um ambiente com suporte a janela gráfica (rode localmente
-na sua máquina, não em servidores sem display).
+Python 3.9+. Pode rodar de qualquer pasta.
 
 ## Controles
 
-| Tecla / Ação      | Função                          |
-|-------------------|----------------------------------|
-| `W` / `S`         | Andar para frente / para trás    |
-| `A` / `D`         | Deslocamento lateral (strafe)    |
-| Mouse             | Olhar ao redor (câmera)          |
-| Clique esquerdo   | Atirar                           |
-| `ESC`             | Liberar / prender o mouse        |
-| `R`               | Reiniciar (após Game Over)       |
+| Tecla / ação | Função |
+|---|---|
+| `W` `A` `S` `D` | andar |
+| Mouse | olhar ao redor |
+| Clique esquerdo (segurar com *Tiro contínuo*) | atirar |
+| `ESC` | pausar / continuar |
+| `R` | reiniciar (no fim de jogo) |
 
-## O que já está implementado
+## Power-ups (soltos ao abater espartanos; é só chegar perto para pegar)
 
-- **Ray casting real**: cada coluna da tela é um raio lançado a partir do
-  jogador; a distância até a parede da arena (um círculo) é calculada
-  analiticamente (interseção raio-círculo) e corrigida contra o efeito
-  "olho de peixe", exatamente como descrito na seção 3 do GDD.
-- **Campo de visão em cone**: o FOV padrão é limitado (70°) e pode ser
-  ampliado temporariamente pelo power-up de visão.
-- **Arena circular / coliseu**: o jogador colide com a borda e não pode
-  sair dela.
-- **Zumbis dos 4 lados**: cada onda nasce em 4 clusters (N/S/L/O) na borda
-  da arena e avança em direção ao jogador.
-- **Ondas infinitas e progressivas**: a cada rodada, mais zumbis nascem e
-  ficam mais rápidos (com um teto de velocidade para manter o jogo justo).
-- **Power-ups ao eliminar zumbis** (chance de 18% por abate):
-  - `VISÃO AMPLIADA` — aumenta o FOV temporariamente.
-  - `TIRO CONTÍNUO` — remove o cooldown entre tiros.
-  - `PARALISAÇÃO` — congela todos os zumbis por alguns segundos.
-  - `EXPLOSÃO` — elimina instantaneamente todos os zumbis da arena.
-- **HUD**: vida, rodada atual, abates, zumbis vivos e power-ups ativos.
-- **Game Over e reinício** (`R`).
+| Item | Efeito |
+|---|---|
+| Visão ampliada | abre o campo de visão de 70° para 110° por 8 s |
+| Tiro contínuo | cadência muito maior por 7 s (segure o clique) |
+| Paralisação | congela todos os inimigos por 4 s |
+| Explosão | onda de choque que elimina todos os espartanos da arena e encerra a rodada |
 
-## Estrutura do código (`main.py`)
+## Quem mexe em quê (papéis do grupo)
 
-- `ray_circle_distance()` — matemática do ray casting contra a arena circular.
-- `Player` — posição, ângulo, vida, FOV, power-ups ativos, movimento/colisão.
-- `Zombie` — posição, velocidade, vida, IA simples de perseguição/ataque.
-- `Game.cast_and_draw()` — renderização em primeira pessoa (paredes via
-  raycasting + zumbis como sprites "billboard" projetados por ângulo/distância).
-- `Game.update()` / `Game.run()` — laço principal, ondas, tiro, power-ups.
+| Papel | Arquivos |
+|---|---|
+| **Líder** | `game.py`, `main.py`, `config.py`, `utils.py` |
+| **Desenvolvedor 1** (tiro, inimigos, pontuação, vitória/derrota) | `enemy.py` (tipos e IA), `shoot.py`, `game.py` → `try_shoot` |
+| **Desenvolvedor 2** (itens, vida/energia, ondas) | `powerups.py`, `waves.py`, `player.py` |
+| **Artes** | `assets/images/**`, `sprites.py`, `renderer.py`, `effects.py`, `tools/` |
+| **Artes e Desenvolvimento** (menu, HUD, telas) | `ui.py` |
+| **Artes e Testes** (sons, testes, balanceamento) | `audio.py`, `assets/sfx/`, `tests/` |
 
-## Próximos passos sugeridos
+## Trocar imagens e sons (sem mexer em código)
 
-- Texturizar as paredes (hoje são coloridas por sombreamento de distância).
-- Trocar os zumbis por sprites/imagens em vez de formas geométricas.
-- Adicionar áudio direcional para ameaças fora do campo de visão.
-- Variar tipos de zumbi (corredor, tanque) e adicionar outras armas
-  (inspiração Contra Online).
-- Sistema de som e efeitos de partícula para tiros e explosões.
+- **Cenário:** substitua `assets/images/fundo2.png` (mesmo tamanho; a linha onde a parede encontra a areia
+  está em `WALL_TEXTURE_BASE_ROW` no `config.py`). A imagem é repetida em 4 faixas espelhadas, com o centro de
+  cada faixa sendo um portão.
+- **Arma:** `assets/images/arma_costas.png`. Para recortar outra vista do `arma.png`:
+  `python tools/preparar_arma.py topo` (opções no topo do arquivo).
+- **Inimigos:** `assets/images/enemies/hoplita.png`, `batedor.png`, `campeao.png`. Cada um é uma faixa com
+  **6 quadros do mesmo tamanho**: `0-3` caminhada, `4` preparando o golpe, `5` golpe. O tamanho do quadro pode ser
+  qualquer um (o jogo escala sozinho), mas mantenha a ordem. Os sprites atuais foram gerados por código
+  (`python tools/gerar_espartanos.py`) e servem de base para o time de Artes redesenhar.
+- **Sons:** coloque na pasta `assets/sfx/` com estes nomes (`.wav`, `.ogg` ou `.mp3`): `tiro` (já existe),
+  `explosao`, `powerup`, `impacto`, `morte`, `dano`, `ataque`, `rodada`, `game_over`. Os que não existirem
+  são simplesmente ignorados. A música é `assets/music/trilha_sonora.mp3`.
+
+## Ajustar o balanceamento
+
+| O que | Onde |
+|---|---|
+| Vida, velocidade, dano, alcance de cada espartano | `ENEMY_TYPES` em `enemy.py` |
+| Quantos inimigos / quando cada tipo aparece / velocidade por rodada | `waves.py` |
+| Chance de drop, duração dos power-ups, raio de coleta | `config.py` |
+| Pausa entre rodadas, velocidade da explosão | `config.py` |
+
+## Testes
+
+```bash
+python tests/teste_automatico.py            # rápido (~20 s)
+python tests/teste_automatico.py --longo    # + 10 min de jogo simulado por um robô
+python tests/teste_automatico.py --capturas # salva imagens em tests/capturas/
+```
+
+Roda sem abrir janela. Veja também `TESTING.md` para o roteiro de testes manuais.
+
+## Como o ray casting funciona aqui (resumo)
+
+Para cada coluna da tela, um raio sai do jogador; a distância até a parede circular da arena
+(interseção raio-círculo, `utils.ray_circle_distance`) define a altura da faixa da parede e qual pedaço do
+`fundo2.png` aparece. Inimigos, itens e partículas são "billboards" projetados com a mesma câmera
+(`renderer.project`) e desenhados do mais longe para o mais perto. Detalhes no topo de `renderer.py`.
+
+Veja `CORRECOES.md` para a lista do que foi corrigido e adicionado.

@@ -1,242 +1,254 @@
+"""
+ui.py
+=====
+HUD e telas por cima do jogo: vida, rodada, abates, power-ups ativos,
+avisos grandes (banner), avisos pequenos (toast), setas para itens fora da
+visão, tela de pausa e de fim de jogo.
+
+BANNER e TOAST ficam em posições diferentes da tela de propósito: assim
+"EXPLOSÃO!" e "RODADA 5" nunca se sobrepõem.
+"""
+import math
+
 import pygame
 
 from config import (
-    SCREEN_WIDTH,
-    SCREEN_HEIGHT,
+    SCREEN_WIDTH as W,
+    SCREEN_HEIGHT as H,
     PLAYER_MAX_HP,
     WHITE,
-    BLACK,
-    RED,
     YELLOW,
+    RED,
     ORANGE,
+    PICKUP_LIFETIME,
+    POWERUP_DURATION,
+    EYE_HEIGHT,
 )
+from powerups import POWERUP_LABELS, POWERUP_COLORS
+from enemy import ENEMY_TYPES
 
-from powerups import POWERUP_LABELS
+SHADOW = (14, 10, 12)
 
 
 class UI:
 
-    def __init__(self, screen):
+    def __init__(self, screen, assets):
 
         self.screen = screen
+        self.assets = assets
 
-        self.font = pygame.font.SysFont(
-            "arial",
-            20
-        )
+        self.font = pygame.font.SysFont("arial", 20, bold=True)
+        self.font_small = pygame.font.SysFont("arial", 15, bold=True)
+        self.font_big = pygame.font.SysFont("arial", 50, bold=True)
+        self.font_huge = pygame.font.SysFont("arial", 68, bold=True)
 
-        self.big_font = pygame.font.SysFont(
-            "arial",
-            48,
-            bold=True
-        )
+        self.banner_text = ""
+        self.banner_sub = ""
+        self.banner_color = YELLOW
+        self.banner_t = 0.0
+        self.banner_total = 1.0
 
-    def draw(
-        self,
-        player,
-        round_num,
-        zombies,
-        state,
-        notification,
-        notification_timer,
-    ):
+        self.toasts = []          # [texto, cor, tempo_restante]
 
-        screen = self.screen
+        self._text_cache = {}
+        self._panel = pygame.Surface((236, 96), pygame.SRCALPHA)
+        pygame.draw.rect(self._panel, (10, 8, 14, 150), self._panel.get_rect(), border_radius=10)
 
-        # Vida
+        self._dim = pygame.Surface((W, H), pygame.SRCALPHA)
 
-        hp_ratio = (
-            max(0, player.hp) /
-            PLAYER_MAX_HP
-        )
+    # ------------------------------------------------------------------
+    def banner(self, text, sub="", duration=2.4, color=YELLOW):
+        self.banner_text = text
+        self.banner_sub = sub
+        self.banner_color = color
+        self.banner_t = duration
+        self.banner_total = duration
 
-        pygame.draw.rect(
-            screen,
-            (60, 20, 20),
-            (
-                20,
-                SCREEN_HEIGHT - 40,
-                220,
-                22,
-            ),
-        )
+    def toast(self, text, color=WHITE, duration=2.2, big=False):
+        self.toasts.append([text, color, duration, big])
+        self.toasts = self.toasts[-3:]
 
-        pygame.draw.rect(
-            screen,
-            RED,
-            (
-                20,
-                SCREEN_HEIGHT - 40,
-                int(220 * hp_ratio),
-                22,
-            ),
-        )
+    def clear(self):
+        self.banner_t = 0.0
+        self.toasts.clear()
 
-        pygame.draw.rect(
-            screen,
-            WHITE,
-            (
-                20,
-                SCREEN_HEIGHT - 40,
-                220,
-                22,
-            ),
-            2,
-        )
+    def update(self, dt):
+        self.banner_t = max(0.0, self.banner_t - dt)
 
-        hp_text = self.font.render(
-            f"HP {int(player.hp)}/{PLAYER_MAX_HP}",
-            True,
-            WHITE,
-        )
+        for t in self.toasts:
+            t[2] -= dt
 
-        screen.blit(
-            hp_text,
-            (26, SCREEN_HEIGHT - 38)
-        )
+        self.toasts = [t for t in self.toasts if t[2] > 0]
 
-        # Rodada
+    # ------------------------------------------------------------------
+    def _render(self, font, text, color):
+        key = (id(font), text, color)
+        surf = self._text_cache.get(key)
 
-        text = self.font.render(
-            f"Rodada: {round_num}",
-            True,
-            YELLOW,
-        )
+        if surf is None:
+            if len(self._text_cache) > 400:
+                self._text_cache.clear()
+            surf = font.render(text, True, color)
+            self._text_cache[key] = surf
 
-        screen.blit(text, (20, 16))
+        return surf
 
-        # Abates
+    def text(self, font, text, color, pos, anchor="topleft", alpha=255, outline=2):
+        main = self._render(font, text, color)
+        dark = self._render(font, text, SHADOW)
+        rect = main.get_rect(**{anchor: pos})
 
-        text = self.font.render(
-            f"Abates: {player.kills}",
-            True,
-            WHITE,
-        )
+        if alpha < 255:
+            main = main.copy()
+            main.set_alpha(alpha)
+            dark = dark.copy()
+            dark.set_alpha(alpha)
 
-        screen.blit(text, (20, 42))
+        for ox, oy in ((-outline, 0), (outline, 0), (0, -outline), (0, outline), (outline, outline)):
+            self.screen.blit(dark, rect.move(ox, oy))
 
-        # Zumbis
+        self.screen.blit(main, rect)
+        return rect
 
-        alive = sum(
-            1
-            for zombie in zombies
-            if zombie.alive
-        )
+    # ==================================================================
+    def draw(self, game):
 
-        text = self.font.render(
-            f"Zumbis na arena: {alive}",
-            True,
-            WHITE,
-        )
+        p = game.player
 
-        screen.blit(text, (20, 68))
+        self._draw_info_panel(game)
+        self._draw_hp(p, game.time)
+        self._draw_powerups(p)
+        self._draw_pickup_arrows(game)
+        self._draw_banner_and_toasts(game)
 
-        # Power-ups
+    def _draw_info_panel(self, game):
 
-        y = 100
+        p = game.player
+        alive = game.enemies_remaining()
 
-        for name, remaining in player.active_powerups.items():
+        self.screen.blit(self._panel, (12, 12))
+        self.text(self.font, f"RODADA  {max(1, game.round_num)}", YELLOW, (26, 20))
+        self.text(self.font, f"Abates: {p.kills}", WHITE, (26, 46))
+        self.text(self.font, f"Espartanos: {alive}", (255, 170, 150) if alive else WHITE, (26, 70))
 
-            text = self.font.render(
-                f"{POWERUP_LABELS[name]}: {remaining:.1f}s",
-                True,
-                ORANGE,
-            )
+    def _draw_hp(self, p, time):
 
-            screen.blit(
-                text,
-                (20, y)
-            )
+        x, y, w, h = 20, H - 46, 270, 26
+        ratio = max(0.0, p.hp / PLAYER_MAX_HP)
 
-            y += 24
+        pygame.draw.rect(self.screen, (24, 8, 10), (x - 3, y - 3, w + 6, h + 6), border_radius=8)
+        pygame.draw.rect(self.screen, (80, 18, 20), (x, y, w, h), border_radius=6)
 
-        # Notificação
+        if ratio > 0:
+            color = (214, 52, 48) if ratio > 0.3 else (255, 90, 40)
+            if ratio <= 0.3 and int(time * 6) % 2 == 0:
+                color = (255, 150, 120)
+            pygame.draw.rect(self.screen, color, (x, y, max(6, int(w * ratio)), h), border_radius=6)
+            pygame.draw.rect(self.screen, (255, 140, 130), (x + 3, y + 3, max(0, int(w * ratio) - 6), 5), border_radius=3)
 
-        if notification_timer > 0:
+        pygame.draw.rect(self.screen, (240, 220, 210), (x, y, w, h), 2, border_radius=6)
+        self.text(self.font, f"VIDA  {int(p.hp)}/{PLAYER_MAX_HP}", WHITE, (x + w // 2, y + h // 2), anchor="center")
 
-            text = self.big_font.render(
-                notification,
-                True,
-                YELLOW,
-            )
+    def _draw_powerups(self, p):
 
-            rect = text.get_rect(
-                center=(
-                    SCREEN_WIDTH // 2,
-                    70,
-                )
-            )
+        x = W - 232
+        y = 16
 
-            screen.blit(
-                text,
-                rect,
-            )
+        for name, remaining in p.active_powerups.items():
+            color = POWERUP_COLORS[name]
+            total = POWERUP_DURATION.get(name, 1.0)
+            ratio = max(0.0, min(1.0, remaining / total))
 
-        # Game Over
+            pygame.draw.rect(self.screen, (10, 8, 14), (x, y, 216, 46), border_radius=9)
+            pygame.draw.rect(self.screen, color, (x, y, 216, 46), 2, border_radius=9)
+            self.screen.blit(self.assets.icons[name], (x + 8, y + 7))
 
-        if state == "game_over":
+            self.text(self.font_small, POWERUP_LABELS[name], color, (x + 48, y + 6))
+            pygame.draw.rect(self.screen, (50, 44, 52), (x + 48, y + 28, 150, 8), border_radius=4)
+            pygame.draw.rect(self.screen, color, (x + 48, y + 28, int(150 * ratio), 8), border_radius=4)
 
-            overlay = pygame.Surface(
-                (
-                    SCREEN_WIDTH,
-                    SCREEN_HEIGHT,
-                )
-            )
+            if remaining < 2.0 and int(remaining * 6) % 2 == 0:      # pisca quando está acabando
+                pygame.draw.rect(self.screen, (255, 255, 255), (x, y, 216, 46), 2, border_radius=9)
 
-            overlay.set_alpha(190)
+            y += 54
 
-            overlay.fill(BLACK)
+    def _draw_pickup_arrows(self, game):
+        """Setas nas bordas apontando para power-ups que estão fora do campo de visão."""
 
-            screen.blit(
-                overlay,
-                (0, 0)
-            )
+        p = game.player
+        half_fov = p.fov / 2
 
-            text = self.big_font.render(
-                "FIM DE JOGO",
-                True,
-                RED,
-            )
+        for d in game.pickups:
+            ang = math.atan2(d.y - p.y, d.x - p.x) - p.angle
+            ang = (ang + math.pi) % (2 * math.pi) - math.pi
 
-            screen.blit(
-                text,
-                text.get_rect(
-                    center=(
-                        SCREEN_WIDTH // 2,
-                        SCREEN_HEIGHT // 2 - 60,
-                    )
-                ),
-            )
+            if abs(ang) < half_fov * 0.92:
+                continue                                  # já está na tela
 
-            text = self.font.render(
-                f"Você sobreviveu até a rodada {round_num} "
-                f"com {player.kills} abates.",
-                True,
-                WHITE,
-            )
+            if d.blinking:
+                continue
 
-            screen.blit(
-                text,
-                text.get_rect(
-                    center=(
-                        SCREEN_WIDTH // 2,
-                        SCREEN_HEIGHT // 2,
-                    )
-                ),
-            )
+            color = POWERUP_COLORS[d.kind]
+            dist = math.hypot(d.x - p.x, d.y - p.y)
+            side = 1 if ang > 0 else -1                   # direita / esquerda
+            ax = W - 34 if side > 0 else 34
+            ay = H // 2 + int(math.sin(game.time * 4 + d.bob_phase) * 6)
 
-            text = self.font.render(
-                "Pressione R para reiniciar",
-                True,
-                YELLOW,
-            )
+            pts = [(ax + side * 16, ay), (ax - side * 10, ay - 16), (ax - side * 10, ay + 16)]
+            pygame.draw.polygon(self.screen, color, pts, 0)
+            pygame.draw.polygon(self.screen, (255, 255, 255), pts, 2)
+            self.screen.blit(pygame.transform.scale(self.assets.icons[d.kind], (22, 22)), (ax - 11, ay - 42))
+            self.text(self.font_small, f"{int(dist / 10)}m", WHITE, (ax, ay + 28), anchor="center")
 
-            screen.blit(
-                text,
-                text.get_rect(
-                    center=(
-                        SCREEN_WIDTH // 2,
-                        SCREEN_HEIGHT // 2 + 40,
-                    )
-                ),
-            )
+    def _draw_banner_and_toasts(self, game):
+
+        # --- banner grande (centro-alto) --------------------------------
+        if self.banner_t > 0:
+            elapsed = self.banner_total - self.banner_t
+            fade_in = min(1.0, elapsed / 0.18)
+            fade_out = min(1.0, self.banner_t / 0.45)
+            alpha = int(255 * min(fade_in, fade_out))
+            slide = int((1.0 - fade_in) * -26)
+
+            self.text(self.font_huge, self.banner_text, self.banner_color, (W // 2, 120 + slide),
+                      anchor="center", alpha=alpha, outline=3)
+
+            if self.banner_sub:
+                self.text(self.font, self.banner_sub, WHITE, (W // 2, 168 + slide), anchor="center", alpha=alpha)
+
+        # contagem regressiva entre rodadas (abaixo do banner, posição própria)
+        if game.wave_state == "intermission" and game.round_num > 0 and game.intermission_timer > 0:
+            self.text(self.font, f"Próxima rodada em {game.intermission_timer:0.1f}s", (255, 235, 190),
+                      (W // 2, 205), anchor="center")
+
+        # --- avisos pequenos (acima da arma, empilhados) -----------------
+        y = H - 150
+        for text, color, remaining, big in reversed(self.toasts):
+            alpha = int(255 * min(1.0, remaining / 0.5))
+            self.text(self.font_big if big else self.font, text, color, (W // 2, y),
+                      anchor="center", alpha=alpha, outline=3 if big else 2)
+            y -= 54 if big else 30
+
+    # ==================================================================
+    def draw_pause(self):
+        self._dim.fill((0, 0, 0, 150))
+        self.screen.blit(self._dim, (0, 0))
+        self.text(self.font_huge, "PAUSADO", WHITE, (W // 2, H // 2 - 50), anchor="center", outline=3)
+        self.text(self.font, "Clique (ou ESC) para continuar", (230, 220, 200), (W // 2, H // 2 + 10), anchor="center")
+        self.text(self.font_small, "WASD move  |  Mouse mira  |  Clique atira", (200, 190, 180), (W // 2, H // 2 + 46), anchor="center")
+
+    def draw_game_over(self, game):
+
+        t = min(1.0, game.game_over_time / 0.9)
+
+        self._dim.fill((40, 0, 0, int(190 * t)))
+        self.screen.blit(self._dim, (0, 0))
+
+        a = int(255 * t)
+        self.text(self.font_huge, "FIM DE JOGO", RED, (W // 2, H // 2 - 80), anchor="center", alpha=a, outline=3)
+        self.text(self.font, f"Você sobreviveu até a rodada {game.round_num}", WHITE, (W // 2, H // 2 - 22), anchor="center", alpha=a)
+        self.text(self.font, f"Espartanos abatidos: {game.player.kills}", WHITE, (W // 2, H // 2 + 10), anchor="center", alpha=a)
+
+        if game.game_over_time > 0.9:
+            blink = 255 if int(game.game_over_time * 2) % 2 == 0 else 150
+            self.text(self.font, "Pressione R para reiniciar", YELLOW, (W // 2, H // 2 + 62), anchor="center", alpha=blink)

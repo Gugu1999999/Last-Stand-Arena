@@ -1,369 +1,464 @@
+import math
 import random
-import sys
 
 import pygame
-
-import math
 
 from config import (
     SCREEN_WIDTH,
     SCREEN_HEIGHT,
     FPS,
-    PLAYER_MAX_HP,
+    ARENA_RADIUS,
+    EYE_HEIGHT,
     SHOOT_RANGE,
     SHOOT_COOLDOWN,
     SHOOT_COOLDOWN_RAPID,
-    SHOOT_ANGLE_TOLERANCE,
+    AIM_ASSIST_DEG,
     POWERUP_DROP_CHANCE,
-    MAX_FOV,
+    PICKUP_RADIUS,
+    PICKUP_MAX_ON_GROUND,
+    FIRST_WAVE_DELAY,
+    INTERMISSION_TIME,
+    ORANGE,
+    RED,
 )
-
 from player import Player
-from audio import AudioManager
+from enemy import Enemy, separate_enemies
 from waves import WaveManager
+from shoot import Bullet
+from powerups import PowerUpDrop, roll_powerup, POWERUP_LABELS, POWERUP_COLORS
+from effects import ParticleSystem, Decals, ScreenFX, Shockwave
+from sprites import Assets
 from renderer import Renderer
 from ui import UI
-from utils import norm_angle
-from shoot import Bullet
-from powerups import (
-    POWERUP_TYPES,
-    POWERUP_LABELS,
-    POWERUP_WEIGHTS,
-)
+from audio import AudioManager
+from utils import ray_circle_distance
 
 
 class Game:
+    """
+    Estados:  "playing" | "paused" | "game_over"
+    Dentro de "playing" a onda tem 2 fases (wave_state):
+        "intermission" -> pausa entre rodadas (contagem regressiva)
+        "active"       -> inimigos nascendo / lutando
+    """
 
     def __init__(self):
 
-        self.audio = AudioManager()
-        self.audio.play_music()
-
         pygame.init()
+        pygame.display.set_caption("Last Stand Arena")
 
-        pygame.display.set_caption(
-            "Last Stand Arena"
-
-        
-        )
-
-        self.screen = pygame.display.set_mode(
-            (
-                SCREEN_WIDTH,
-                SCREEN_HEIGHT,
-            )
-        )
-
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.clock = pygame.time.Clock()
 
-        self.mouse_locked = True
+        self.audio = AudioManager()
+        self.assets = Assets()                # precisa vir DEPOIS do display (convert_alpha)
+        self.renderer = Renderer(self.screen, self.assets)
+        self.ui = UI(self.screen, self.assets)
+        self.decals = Decals()
 
-        pygame.mouse.set_visible(False)
-        pygame.event.set_grab(True)
-
-        self.player = Player()
-
-        self.zombies = []
-        self.bullets = []
-        self.powerups = []
-
+        self.mouse_locked = False
         self.mouse_held = False
-
-        self.wave_manager = WaveManager(
-            self.zombies
-        )
-
-        self.renderer = Renderer(
-            self.screen
-        )
-
-        self.ui = UI(
-            self.screen
-        )
-
-        self.notification = ""
-        self.notification_timer = 0
-
-        self.state = "playing"
+        self.fps_timer = 0.0
 
         self.reset()
+        self.audio.play_music()
 
+    # ==================================================================
+    #  CONTROLE DE PARTIDA
+    # ==================================================================
     def reset(self):
 
         self.player = Player()
 
-        self.zombies.clear()
-        self.bullets.clear()
-        self.powerups.clear()
+        self.enemies = []
+        self.bullets = []
+        self.pickups = []
 
-        self.mouse_held = False
+        self.particles = ParticleSystem()
+        self.fx = ScreenFX()
+        self.decals.clear_stains()
+        self.shockwave = None
 
-        self.wave_manager = WaveManager(
-            self.zombies
-        )
+        self.wave_manager = WaveManager()
+        self.round_num = 0
+        self.spawn_queue = []
+        self.wave_time = 0.0
+        self.base_speed = 0.0
+        self.champion_warned = False
 
+        self.wave_state = "intermission"
+        self.intermission_timer = FIRST_WAVE_DELAY
+
+        self.time = 0.0
+        self.game_over_time = 0.0
         self.state = "playing"
 
-        self.notification = ""
-        self.notification_timer = 0
+        self.ui.clear()
+        self.ui.banner("PREPARE-SE", "Os portões da arena vão se abrir...", 2.0)
 
-        self.start_next_round()
+        self.mouse_held = False
+        self.set_mouse_lock(True)
 
-    def start_next_round(self, explosion=False):
+        if self.audio.enabled and getattr(self, "_music_started", False):
+            self.audio.play_music()
 
-        self.wave_manager.start_next_round()
+        self._music_started = True
 
-        self.audio.play_round_start()
+    def set_mouse_lock(self, locked):
+        self.mouse_locked = locked
+        pygame.event.set_grab(locked)
+        pygame.mouse.set_visible(not locked)
 
-        self.player.round_num = (
-            self.wave_manager.round_num
-        )
-        if explosion:
-            self.notify(
-                f"XXXXX {self.wave_manager.round_num} - EXPLOSÃO!"
-            )
-        self.notify(
-            f"RODADA {self.wave_manager.round_num}"
-        )
+    def toggle_pause(self):
 
-    def notify(
-        self,
-        text,
-        duration=2.2,
-    ):
+        if self.state == "playing":
+            self.state = "paused"
+            self.mouse_held = False
+            self.set_mouse_lock(False)
+            self.audio.pause_music()
 
-        self.notification = text
-        self.notification_timer = duration
+        elif self.state == "paused":
+            self.state = "playing"
+            self.set_mouse_lock(True)
+            self.audio.resume_music()
 
-    def update(self, dt):
+    def game_over(self):
+        self.state = "game_over"
+        self.game_over_time = 0.0
+        self.mouse_held = False
+        self.set_mouse_lock(False)
+        self.fx.shake(10, 0.5)
+        self.audio.stop_music()
+        self.audio.play("game_over")
 
-        if self.state == "game_over":
-            return
+    def enemies_remaining(self):
+        return sum(1 for e in self.enemies if e.alive) + len(self.spawn_queue)
 
-        self.player.update_powerups(dt)
+    # ==================================================================
+    #  ONDAS
+    # ==================================================================
+    def start_next_round(self):
 
-        self.player.shoot_timer = max(
-            0,
-            self.player.shoot_timer - dt
-        )
+        self.spawn_queue, self.base_speed = self.wave_manager.start_next_round()
+        self.round_num = self.wave_manager.round_num
+        self.player.round_num = self.round_num
 
-        if self.notification_timer > 0:
+        self.wave_time = 0.0
+        self.champion_warned = False
+        self.wave_state = "active"
 
-            self.notification_timer -= dt
+        self.ui.banner(f"RODADA {self.round_num}", f"{len(self.spawn_queue)} espartanos a caminho", 2.4)
+        self.audio.play("round_start")
 
-        keys = pygame.key.get_pressed()
+    def finish_wave(self):
+        """Todos mortos: pausa antes da próxima rodada (nunca começa em cima da explosão)."""
 
-        self.player.handle_movement(dt, keys)
-        self.collect_powerups()
+        self.wave_state = "intermission"
+        self.intermission_timer = INTERMISSION_TIME
 
-        # Tiro contínuo: enquanto o botão estiver pressionado e o
-        # power-up "rapid_fire" estiver ativo, dispara automaticamente
-        # a cada frame (o próprio try_shoot respeita o cooldown).
-        if (
-            self.mouse_held
-            and self.player.has_powerup("rapid_fire")
-        ):
-            self.try_shoot()
+        self.ui.banner("ARENA LIMPA", f"Rodada {self.round_num} concluída", 2.2, color=(140, 230, 150))
 
-        self.update_bullets(dt)
+    def spawn_enemy(self, order):
 
-        frozen = self.player.has_powerup(
-            "freeze"
-        )
+        x, y = WaveManager.spawn_position(order.gate_angle)
 
-        alive_count = 0
+        self.enemies.append(Enemy(order.kind, x, y, self.base_speed, self.round_num))
+        self.particles.dust(x, y, n=10, spread=60.0, big=True)
 
-        for zombie in self.zombies:
+        if order.kind == "campeao" and not self.champion_warned:
+            self.champion_warned = True
+            self.ui.toast("CAMPEÃO ESPARTANO!", RED, 2.4)
 
-            zombie.update(
-                dt,
-                self.player,
-                frozen,
-                self.audio,
-            )
+    def update_wave(self, dt):
 
-            if zombie.alive:
-                alive_count += 1
+        if self.wave_state == "intermission":
 
-        if self.player.hp <= 0:
+            self.intermission_timer -= dt
 
-            self.player.hp = 0
-
-            self.state = "game_over"
-
-            self.audio.play_game_over()
+            if self.intermission_timer <= 0:
+                self.start_next_round()
 
             return
 
-        if alive_count == 0:
+        self.wave_time += dt
 
-            self.zombies.clear()
+        while self.spawn_queue and self.spawn_queue[0].time <= self.wave_time:
+            self.spawn_enemy(self.spawn_queue.pop(0))
 
-            self.start_next_round()
+        wave_over = (
+            not self.spawn_queue
+            and not any(e.alive for e in self.enemies)
+            and self.shockwave is None            # espera a explosão terminar
+        )
 
-    def collect_powerups(self):
+        if wave_over:
+            self.finish_wave()
 
-        remaining = []
-
-        for powerup in self.powerups:
-
-            dx = powerup["x"] - self.player.x
-            dy = powerup["y"] - self.player.y
-
-            distance = math.hypot(dx, dy)
-
-            if distance <= 1.2:
-                self.apply_powerup(powerup["type"])
-                self.audio.play_powerup()
-            else:
-                remaining.append(powerup)
-
-        self.powerups = remaining
-
+    # ==================================================================
+    #  TIRO
+    # ==================================================================
     def try_shoot(self):
 
-        # Cooldown entre um tiro e outro: precisa SEMPRE ser respeitado,
-        # com ou sem "tiro contínuo" ativo. O que muda com o power-up é
-        # apenas o valor do cooldown (bem mais curto), nunca se ele existe.
-        if self.player.shoot_timer > 0:
+        p = self.player
+
+        if self.state != "playing" or p.shoot_timer > 0:
             return
 
-        if self.player.has_powerup(
-            "rapid_fire"
-        ):
-            self.player.shoot_timer = SHOOT_COOLDOWN_RAPID
-        else:
-            self.player.shoot_timer = SHOOT_COOLDOWN
+        rapid = p.has_powerup("rapid_fire")
 
-        best_zombie = None
-
-        best_distance = SHOOT_RANGE
-
-        for zombie in self.zombies:
-
-            if not zombie.alive:
-                continue
-
-            dx = zombie.x - self.player.x
-            dy = zombie.y - self.player.y
-
-            distance = (
-                dx * dx +
-                dy * dy
-            ) ** 0.5
-
-            angle = norm_angle(
-                math.atan2(dy, dx)
-                - self.player.angle
-            )
-
-            if (
-                abs(angle)
-                <= SHOOT_ANGLE_TOLERANCE
-                and distance < best_distance
-            ):
-
-                best_distance = distance
-                best_zombie = zombie
-
-        if best_zombie:
-
-            # A mira trava no alvo na hora do disparo, mas o impacto só
-            # acontece quando a bala "viaja" até lá (ver update_bullets).
-            self.bullets.append(
-                Bullet(
-                    self.player.x,
-                    self.player.y,
-                    best_zombie,
-                )
-            )
+        p.shoot_timer = SHOOT_COOLDOWN_RAPID if rapid else SHOOT_COOLDOWN
+        p.recoil = 1.0
+        p.muzzle_flash = 0.07
 
         self.audio.play_shoot()
 
-    def update_bullets(self, dt):
+        fx, fy = p.dir_x, p.dir_y
+        tolerance = math.tan(math.radians(AIM_ASSIST_DEG))
 
-        remaining = []
+        target = None
+        best = SHOOT_RANGE
 
-        for bullet in self.bullets:
+        for e in self.enemies:
 
-            arrived = bullet.update(dt)
-
-            if not arrived:
-                remaining.append(bullet)
+            if not e.alive:
                 continue
 
-            target = bullet.target
+            dx = e.x - p.x
+            dy = e.y - p.y
 
-            # O alvo pode ter morrido enquanto a bala viajava
-            # (ex.: power-up de explosão). Nesse caso não conta de novo.
-            if target.alive:
+            along = dx * fx + dy * fy                   # distância ao longo da mira
 
-                target.hit_flash = 0.15
+            if along <= 0 or along >= best:
+                continue
 
-                # Qualquer zumbi que tome um tiro morre — a bala que
-                # chega ao alvo é sempre um abate garantido.
-                self.kill_zombie(target)
+            perp = abs(dx * fy - dy * fx)               # quão longe da linha de mira
+
+            if perp <= e.hit_radius + along * tolerance:
+                target = e
+                best = along
+
+        if target is not None:
+            self.bullets.append(Bullet(p.x, p.y, target=target))
+        else:
+            d = ray_circle_distance(p.x, p.y, fx, fy, ARENA_RADIUS)
+            self.bullets.append(Bullet(p.x, p.y, end=(p.x + fx * d, p.y + fy * d)))
+
+    def update_bullets(self, dt):
+
+        p = self.player
+        remaining = []
+
+        for b in self.bullets:
+
+            if not b.update(dt):
+                remaining.append(b)
+                continue
+
+            t = b.target
+
+            if t is None:                                    # tiro perdido: poeira na parede
+                ex, ey = b.end
+                self.particles.dust(ex, ey, n=3, spread=30.0)
+                self.particles.sparks(ex, ey, EYE_HEIGHT, 3)
+
+            elif t.alive:
+                killed = t.take_hit(1, p.x, p.y)
+
+                p.hit_marker = 0.16
+                p.hit_marker_kill = killed
+
+                # o sangue espirra em direção ao jogador
+                self.particles.sparks(t.x, t.y, EYE_HEIGHT * 0.7, 4)
+                self.particles.blood(t.x, t.y, EYE_HEIGHT * 0.7, 2 * t.x - p.x, 2 * t.y - p.y,
+                                     n=16 if killed else 7)
+
+                if killed:
+                    self.on_enemy_killed(t, "bullet")
+                else:
+                    self.audio.play("hit")
 
         self.bullets = remaining
 
-    def kill_zombie(self, zombie):
-
-        zombie.alive = False
+    # ==================================================================
+    #  MORTES E POWER-UPS
+    # ==================================================================
+    def on_enemy_killed(self, enemy, cause):
 
         self.player.kills += 1
 
-        if random.random() < POWERUP_DROP_CHANCE:
+        size = 52.0 if enemy.kind == "campeao" else 34.0
+        self.decals.add_blood(enemy.x, enemy.y, size, burned=(cause == "explosion"))
+        self.particles.dust(enemy.x, enemy.y, n=5, spread=40.0)
+        self.audio.play("kill")
 
-            powerup = random.choices(
-                POWERUP_TYPES,
-                weights=[
-                    POWERUP_WEIGHTS[name]
-                    for name in POWERUP_TYPES
-                ],
-                k=1,
-            )[0]
+        # só quem morre a tiro solta item (a explosão não gera itens em cadeia)
+        if (
+            cause == "bullet"
+            and len(self.pickups) < PICKUP_MAX_ON_GROUND
+            and random.random() < POWERUP_DROP_CHANCE
+        ):
+            kind = roll_powerup()
+            self.pickups.append(PowerUpDrop(kind, enemy.x, enemy.y))
+            self.particles.sparkle(enemy.x, enemy.y, 40.0, POWERUP_COLORS[kind], n=12)
 
-            self.powerups.append(
-                {
-                    "type": powerup,
-                    "x": zombie.x,
-                    "y": zombie.y,
-                }
-            )
-    def apply_powerup(self, name):
+    def update_pickups(self, dt):
 
-        if name == "explosion":
+        p = self.player
+        keep = []
 
-            self.audio.play_explosion()
-            count = 0
+        for d in self.pickups:
 
-            for zombie in self.zombies:
+            d.update(dt, p)
 
-                if zombie.alive:
+            if d.expired:
+                continue
 
-                    zombie.alive = False
+            if math.hypot(d.x - p.x, d.y - p.y) <= PICKUP_RADIUS:
+                self.collect_pickup(d)
+                continue
 
-                    count += 1
+            keep.append(d)
 
-            self.player.kills += count
+        self.pickups = keep
 
-            self.notify(
-                "EXPLOSÃO! Arena limpa"
-            )
+    def collect_pickup(self, drop):
 
-        else:
+        color = POWERUP_COLORS[drop.kind]
 
-            self.player.add_powerup(
-                name
-            )
+        self.particles.sparkle(drop.x, drop.y, 40.0, color, n=22)
+        self.fx.flash(color, 0.30, 3.2)
+        self.audio.play("powerup")
 
-            if name == "vision":
+        self.apply_powerup(drop.kind)
 
-                self.player.fov = MAX_FOV
+    def apply_powerup(self, kind):
 
-            self.notify(
-                f"Power-up: {POWERUP_LABELS[name]}"
-            )
+        if kind == "explosion":
+            self.trigger_explosion()
+            return
+
+        self.player.add_powerup(kind)
+        self.ui.toast(f"{POWERUP_LABELS[kind]}!", POWERUP_COLORS[kind], 2.0)
+
+    def trigger_explosion(self):
+        """
+        Cria uma onda de choque que sai do jogador. Os inimigos morrem quando a
+        onda passa por eles (ver update_shockwave). A fila de inimigos que
+        ainda não nasceram também é cancelada: a explosão encerra a rodada.
+        """
+
+        p = self.player
+
+        self.shockwave = Shockwave(p.x, p.y)
+        self.spawn_queue.clear()
+
+        self.fx.flash((255, 205, 120), 0.9, 1.5)
+        self.fx.shake(15, 1.0)
+        self.fx.heat = 1.0
+
+        self.ui.toast("EXPLOSÃO!", ORANGE, 1.8, big=True)
+        self.audio.play_explosion()
+
+    def update_shockwave(self, dt):
+
+        sw = self.shockwave
+
+        if sw is None:
+            return
+
+        sw.advance(dt)
+
+        for e in self.enemies:
+            if e.alive and math.hypot(e.x - sw.x, e.y - sw.y) <= sw.radius:
+                e.die(burned=True)
+                self.particles.fire(e.x, e.y, 0.0, n=16)
+                self.particles.blood(e.x, e.y, 60.0, e.x, e.y, n=6)
+                self.on_enemy_killed(e, "explosion")
+
+        if sw.done:
+            self.shockwave = None
+
+    # ==================================================================
+    #  UPDATE
+    # ==================================================================
+    def update(self, dt):
+
+        if self.state == "paused":
+            return
+
+        self.time += dt
+
+        p = self.player
+
+        if self.state == "game_over":
+            self.game_over_time += dt
+            p.update(dt)
+            self.fx.update(dt)
+            self.particles.update(dt)
+            self.ui.update(dt)
+            return
+
+        p.update(dt)
+        self.fx.update(dt)
+        self.particles.update(dt)
+        self.ui.update(dt)
+
+        p.handle_movement(dt, pygame.key.get_pressed())
+
+        if self.mouse_held and p.has_powerup("rapid_fire"):
+            self.try_shoot()
+
+        self.update_pickups(dt)
+        self.update_bullets(dt)
+        self.update_shockwave(dt)
+        self.update_wave(dt)
+
+        frozen = p.has_powerup("freeze")
+
+        for e in self.enemies:
+            if e.update(dt, p, frozen):
+                self.fx.shake(7, 0.3)
+                self.audio.play("hurt")
+
+        separate_enemies(self.enemies)
+        self.enemies = [e for e in self.enemies if not e.removed]
+
+        if p.hp <= 0:
+            self.game_over()
+
+    # ==================================================================
+    #  LOOP PRINCIPAL
+    # ==================================================================
+    def handle_event(self, event):
+
+        if event.type == pygame.KEYDOWN:
+
+            if event.key == pygame.K_ESCAPE:
+                self.toggle_pause()
+
+            elif event.key == pygame.K_r and self.state == "game_over":
+                self.reset()
+
+        elif event.type == pygame.MOUSEMOTION:
+
+            if self.state == "playing" and self.mouse_locked:
+                self.player.rotate_mouse(event.rel[0])
+
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+
+            if self.state == "paused":
+                self.toggle_pause()                  # o clique que "volta" ao jogo não atira
+
+            elif self.state == "playing":
+                self.mouse_held = True
+                self.try_shoot()
+
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self.mouse_held = False
+
+        elif event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
+            if self.state == "playing":
+                self.toggle_pause()                  # perdeu o foco: pausa sozinho
 
     def run(self):
 
@@ -371,533 +466,29 @@ class Game:
 
         while running:
 
-            dt = (
-                self.clock.tick(FPS)
-                / 1000.0
-            )
-
-            dt = min(
-                dt,
-                0.05
-            )
+            dt = min(self.clock.tick(FPS) / 1000.0, 0.05)
 
             for event in pygame.event.get():
-
                 if event.type == pygame.QUIT:
-
                     running = False
-
-                elif event.type == pygame.KEYDOWN:
-
-                    if event.key == pygame.K_ESCAPE:
-
-                        self.mouse_locked = (
-                            not self.mouse_locked
-                        )
-
-                        pygame.event.set_grab(
-                            self.mouse_locked
-                        )
-
-                        pygame.mouse.set_visible(
-                            not self.mouse_locked
-                        )
-
-                    elif (
-                        event.key == pygame.K_r
-                        and self.state == "game_over"
-                    ):
-
-                        self.reset()
-
-                elif (
-                    event.type == pygame.MOUSEMOTION
-                    and self.mouse_locked
-                ):
-
-                    self.player.rotate_mouse(
-                        event.rel[0]
-                    )
-
-                elif (
-                    event.type
-                    == pygame.MOUSEBUTTONDOWN
-                    and event.button == 1
-                ):
-
-                    self.mouse_held = True
-
-                    if self.state == "playing":
-
-                        self.try_shoot()
-
-                elif (
-                    event.type
-                    == pygame.MOUSEBUTTONUP
-                    and event.button == 1
-                ):
-
-                    self.mouse_held = False
+                else:
+                    self.handle_event(event)
 
             self.update(dt)
 
-            self.renderer.render(
-                self.player,
-                self.zombies,
-                self.bullets,
-                self.powerups,
-            )
+            self.renderer.render(self)
+            self.ui.draw(self)
 
-            self.ui.draw(
-                self.player,
-                self.wave_manager.round_num,
-                self.zombies,
-                self.state,
-                self.notification,
-                self.notification_timer,
-            )
+            if self.state == "paused":
+                self.ui.draw_pause()
+            elif self.state == "game_over":
+                self.ui.draw_game_over(self)
 
             pygame.display.flip()
 
+            self.fps_timer += dt
+            if self.fps_timer >= 0.5:
+                self.fps_timer = 0.0
+                pygame.display.set_caption(f"Last Stand Arena  -  {self.clock.get_fps():.0f} FPS")
+
         pygame.quit()
-
-        sys.exit()
-
-
-
-import math
-import pygame
-
-from config import (
-    SCREEN_WIDTH,
-    SCREEN_HEIGHT,
-    ARENA_RADIUS,
-    RENDER_COLS,
-    MAX_DEPTH,
-    GREY,
-    SAND,
-    WHITE,
-    GREEN,
-    DARK_GREEN,
-    YELLOW,
-)
-
-from utils import (
-    norm_angle,
-    ray_circle_distance,
-)
-
-
-class Renderer:
-
-    def __init__(self, screen):
-
-        self.screen = screen
-
-    def render(self, player, zombies, bullets=None, powerups=None):
-
-        screen = self.screen
-
-        half_h = SCREEN_HEIGHT // 2
-
-        screen.fill(
-            GREY,
-            (0, 0, SCREEN_WIDTH, half_h)
-        )
-
-        screen.fill(
-            SAND,
-            (0, half_h, SCREEN_WIDTH, half_h)
-        )
-
-        fov = player.fov
-
-        col_width = SCREEN_WIDTH / RENDER_COLS
-
-        z_buffer = [MAX_DEPTH] * RENDER_COLS
-        powerups = powerups or []
-
-        # Paredes
-
-        for col in range(RENDER_COLS):
-
-            cam_t = (col / RENDER_COLS) - 0.5
-
-            ray_angle = (
-                player.angle +
-                cam_t * fov
-            )
-
-            dx = math.cos(ray_angle)
-            dy = math.sin(ray_angle)
-
-            distance = ray_circle_distance(
-                player.x,
-                player.y,
-                dx,
-                dy,
-                ARENA_RADIUS,
-            )
-
-            corrected = (
-                distance *
-                math.cos(ray_angle - player.angle)
-            )
-
-            corrected = max(
-                corrected,
-                0.0001
-            )
-
-            z_buffer[col] = corrected
-
-            wall_h = min(
-                SCREEN_HEIGHT,
-                (SCREEN_HEIGHT * 260) / corrected
-            )
-
-            shade = max(
-                0.15,
-                1.0 - corrected / ARENA_RADIUS
-            )
-
-            color = (
-                int(GREY[0] * shade + 40 * (1 - shade)),
-                int(GREY[1] * shade + 20 * (1 - shade)),
-                int(GREY[2] * shade + 20 * (1 - shade)),
-            )
-
-            x = int(col * col_width)
-
-            pygame.draw.rect(
-                screen,
-                color,
-                (
-                    x,
-                    int(half_h - wall_h / 2),
-                    math.ceil(col_width) + 1,
-                    int(wall_h),
-                ),
-            )
-
-        # Zumbis
-
-        visible = []
-
-        for zombie in zombies:
-
-            if not zombie.alive:
-                continue
-
-            dx = zombie.x - player.x
-            dy = zombie.y - player.y
-
-            distance = math.hypot(dx, dy)
-
-            angle = norm_angle(
-                math.atan2(dy, dx) -
-                player.angle
-            )
-
-            if (
-                abs(angle) < fov / 2 + 0.15
-                and distance > 1
-            ):
-                visible.append(
-                    (distance, angle, zombie)
-                )
-
-        visible.sort(
-            key=lambda item: -item[0]
-        )
-
-        for distance, angle, zombie in visible:
-
-            screen_x = (
-                SCREEN_WIDTH / 2 +
-                math.tan(angle) *
-                (SCREEN_WIDTH / 2) /
-                math.tan(fov / 2)
-            )
-
-            col = int(
-                screen_x /
-                SCREEN_WIDTH *
-                RENDER_COLS
-            )
-
-            col = max(
-                0,
-                min(RENDER_COLS - 1, col)
-            )
-
-            if distance > z_buffer[col] + 6:
-                continue
-
-            size = min(
-                SCREEN_HEIGHT * 1.1,
-                (SCREEN_HEIGHT * 130) / distance
-            )
-
-            top = half_h - size / 2
-
-            color = (
-                WHITE
-                if zombie.hit_flash > 0
-                else DARK_GREEN
-            )
-
-            body_color = (
-                WHITE
-                if zombie.hit_flash > 0
-                else GREEN
-            )
-
-            pygame.draw.rect(
-                screen,
-                color,
-                (
-                    screen_x - size * 0.16,
-                    top + size * 0.32,
-                    size * 0.32,
-                    size * 0.5,
-                ),
-            )
-
-            pygame.draw.circle(
-                screen,
-                body_color,
-                (
-                    int(screen_x),
-                    int(top + size * 0.22),
-                ),
-                max(
-                    2,
-                    int(size * 0.16)
-                ),
-            )
-
-            pygame.draw.line(
-                screen,
-                color,
-                (
-                    screen_x - size * 0.16,
-                    top + size * 0.4,
-                ),
-                (
-                    screen_x - size * 0.32,
-                    top + size * 0.65,
-                ),
-                max(1, int(size * 0.04)),
-            )
-
-            pygame.draw.line(
-                screen,
-                color,
-                (
-                    screen_x + size * 0.16,
-                    top + size * 0.4,
-                ),
-                (
-                    screen_x + size * 0.32,
-                    top + size * 0.65,
-                ),
-                max(1, int(size * 0.04)),
-            )
-
-        self.draw_powerups(
-            player,
-            powerups,
-            fov,
-            half_h,
-            z_buffer,
-        )
-
-        self.draw_bullets(
-            player,
-            bullets or [],
-            fov,
-            half_h,
-            z_buffer,
-        )
-
-        self.draw_weapon()
-        self.draw_crosshair()
-
-    def draw_powerups(
-            self,
-            player,
-            powerups,
-            fov,
-            half_h,
-            z_buffer,
-    ):
-        colors = {
-            "vision": (80, 160, 255),
-            "rapid_fire": (255, 220, 50),
-            "freeze": (100, 220, 255),
-            "explosion": (255, 100, 50),
-
-        }  
-
-        for powerup in powerups:
-
-            dx = powerup["x"] - player.x
-            dy = powerup["y"] - player.y
-
-            distance = math.hypot(dx, dy)
-
-            if distance < 0.5:
-                continue
-            angle = norm_angle(
-                math.atan2(dy, dx) - player.angle
-            )
-
-            if abs(angle) >= fov / 2 + 0.05:
-                continue
-
-            screen_x = (
-                SCREEN_WIDTH / 2 
-                + math.tan(angle)
-                * (SCREEN_WIDTH / 2)
-                / math.tan(fov / 2)
-            )
-
-            col = int(screen_x / SCREEN_WIDTH * RENDER_COLS)
-            col = max(0, min(RENDER_COLS - 1, col))
-
-            if distance > z_buffer[col] + 6:
-                continue
-
-            size = max(
-                6,
-                min(30, (SCREEN_HEIGHT * 35) / distance),
-            )
-
-            center_y = int(half_h + size * 0.7)
-
-            color = colors.get(powerup["type"], YELLOW)
-
-            points = [
-                (int(screen_x), int(center_y - size)),
-                (int(screen_x + size), int(center_y)),
-                (int(screen_x), int(center_y + size)),
-                (int(screen_x - size), int(center_y)),
-            ]
-
-            pygame.draw.polygon(self.screen, color, points)
-              
-
-    def draw_bullets(
-        self,
-        player,
-        bullets,
-        fov,
-        half_h,
-        z_buffer,
-    ):
-
-        for bullet in bullets:
-
-            dx = bullet.x - player.x
-            dy = bullet.y - player.y
-
-            distance = math.hypot(dx, dy)
-
-            if distance < 1:
-                continue
-
-            angle = norm_angle(
-                math.atan2(dy, dx) -
-                player.angle
-            )
-
-            if abs(angle) >= fov / 2 + 0.05:
-                continue
-
-            screen_x = (
-                SCREEN_WIDTH / 2 +
-                math.tan(angle) *
-                (SCREEN_WIDTH / 2) /
-                math.tan(fov / 2)
-            )
-
-            col = int(
-                screen_x /
-                SCREEN_WIDTH *
-                RENDER_COLS
-            )
-
-            col = max(
-                0,
-                min(RENDER_COLS - 1, col)
-            )
-
-            if distance > z_buffer[col] + 6:
-                continue
-
-            size = max(
-                2,
-                min(14, (SCREEN_HEIGHT * 14) / distance)
-            )
-
-            pygame.draw.circle(
-                self.screen,
-                YELLOW,
-                (int(screen_x), int(half_h)),
-                int(size),
-            )
-
-    def draw_weapon(self):
-
-        gun_w = 140
-        gun_h = 170
-
-        gx = SCREEN_WIDTH / 2 - gun_w / 2
-        gy = SCREEN_HEIGHT - gun_h + 40
-
-        pygame.draw.rect(
-            self.screen,
-            (40, 40, 40),
-            (
-                gx + 30,
-                gy,
-                40,
-                120,
-            ),
-            border_radius=6,
-        )
-
-        pygame.draw.rect(
-            self.screen,
-            (25, 25, 25),
-            (
-                gx + 15,
-                gy + 90,
-                70,
-                30,
-            ),
-            border_radius=4,
-        )
-
-    def draw_crosshair(self):
-
-        center_x = SCREEN_WIDTH // 2
-        center_y = SCREEN_HEIGHT // 2
-
-        pygame.draw.line(
-            self.screen,
-            WHITE,
-            (center_x - 10, center_y),
-            (center_x + 10, center_y),
-            2,
-        )
-
-        pygame.draw.line(
-            self.screen,
-            WHITE,
-            (center_x, center_y - 10),
-            (center_x, center_y + 10),
-            2,
-        )
-
